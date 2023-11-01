@@ -439,9 +439,11 @@ func (c *controller) run(ctx context.Context, stop <-chan struct{}) error {
 	go c.ssetInf.Run(stop)
 
 	if err := c.waitForCacheSync(stop); err != nil {
+		level.Debug(c.logger).Log("msg", "=================")
 		return err
 	}
 
+	level.Debug(c.logger).Log("msg", "+++++++++")
 	_, err := c.cmapInf.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(_ interface{}) { c.queue.add() },
 		DeleteFunc: func(_ interface{}) { c.queue.add() },
@@ -513,11 +515,12 @@ func (c *controller) sync(ctx context.Context) {
 	if !ok || err != nil {
 		c.reconcileErrors.WithLabelValues(fetch).Inc()
 		level.Warn(c.logger).Log("msg", "could not fetch ConfigMap", "err", err, "name", c.options.configMapName)
-
+		level.Debug(c.logger).Log("return")
 		return
 	}
 
 	cm, ok := configMap.(*corev1.ConfigMap)
+	level.Debug(c.logger).Log("cm", cm, "ok", ok)
 	if !ok {
 		level.Error(c.logger).Log("msg", "failed type assertion from expected ConfigMap")
 	}
@@ -532,16 +535,22 @@ func (c *controller) sync(ctx context.Context) {
 
 	statefulsets := make(map[string]*appsv1.StatefulSet)
 
+	level.Debug(c.logger).Log("msg ****", fmt.Sprintf("statefulsets count: %d", len(c.ssetInf.GetStore().List())))
 	for _, obj := range c.ssetInf.GetStore().List() {
 		sts, ok := obj.(*appsv1.StatefulSet)
+		level.Debug(c.logger).Log("sts name", sts.Name, "ok", ok, "err", err)
 		if !ok {
 			level.Error(c.logger).Log("msg", "failed type assertion from expected StatefulSet")
 		}
 
+		level.Debug(c.logger).Log("msg", fmt.Sprintf("sts Labels: %v", sts.Labels), "hashringLabelKey", hashringLabelKey)
 		hashring, ok := sts.Labels[hashringLabelKey]
+		level.Debug(c.logger).Log("hashring", hashring, "ok", ok)
 		if !ok {
 			continue
 		}
+
+		level.Debug(c.logger).Log("msg=========", fmt.Sprintf("c.replicas[hashring]: %v sts.Spec.Replicas: %v", c.replicas[hashring], *sts.Spec.Replicas))
 
 		// If there's an increase in replicas we poll for the new replicas to be ready
 		if _, ok := c.replicas[hashring]; ok && c.replicas[hashring] < *sts.Spec.Replicas {
@@ -549,6 +558,7 @@ func (c *controller) sync(ctx context.Context) {
 			for i := c.replicas[hashring]; i < *sts.Spec.Replicas; i++ {
 				start := time.Now()
 				podName := fmt.Sprintf("%s-%d", sts.Name, i)
+				level.Debug(c.logger).Log("msg: podName", podName)
 
 				if err := c.waitForPod(ctx, podName); err != nil {
 					level.Warn(c.logger).Log("msg", "failed polling until pod is ready", "pod", podName, "duration", time.Since(start), "err", err)
@@ -567,6 +577,7 @@ func (c *controller) sync(ctx context.Context) {
 
 	c.populate(ctx, hashrings, statefulsets)
 
+	level.Debug(c.logger).Log("msg", fmt.Sprintf("hashrings: %v,\nconfigmap: %v", hashrings, cm))
 	err = c.saveHashring(ctx, hashrings, cm)
 	if err != nil {
 		c.reconcileErrors.WithLabelValues(save).Inc()
@@ -609,8 +620,10 @@ func (c controller) waitForPod(ctx context.Context, name string) error {
 }
 
 func (c *controller) populate(ctx context.Context, hashrings []receive.HashringConfig, statefulsets map[string]*appsv1.StatefulSet) {
+	level.Debug(c.logger).Log("msg ##########populate", fmt.Sprintf("hashrings: %v,\nstatefulsets: %v", hashrings, statefulsets))
 	for i, h := range hashrings {
 		sts, exists := statefulsets[h.Hashring]
+		level.Debug(c.logger).Log("msg ##########populate", fmt.Sprintf("sts: %v, exists: %v", sts, exists))
 		if !exists {
 			continue
 		}
@@ -620,6 +633,7 @@ func (c *controller) populate(ctx context.Context, hashrings []receive.HashringC
 		for i := 0; i < int(*sts.Spec.Replicas); i++ {
 			if c.options.allowDynamicScaling {
 				podName := fmt.Sprintf("%s-%d", sts.Name, i)
+				level.Debug(c.logger).Log("msg\tpopulate\t", fmt.Sprintf("i: %d, podName: %s", i, podName))
 
 				pod, err := c.klient.CoreV1().Pods(c.options.namespace).Get(ctx, podName, metav1.GetOptions{})
 				if kerrors.IsNotFound(err) {
